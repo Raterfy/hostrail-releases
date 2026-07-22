@@ -23,16 +23,16 @@ Windows, Linux, and Android.
 
 ## Download Hostrail
 
-The current release is **Hostrail 1.5.0**.
+The current release is **Hostrail 1.6.0**.
 
 | Platform | Download | Package |
 |---|---|---|
-| macOS | [**Universal app**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.5.0/Hostrail-1.5.0-macos-universal.zip) | Apple Silicon + Intel |
-| Windows | [**Windows x64**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.5.0/Hostrail-1.5.0-windows-x64.zip) | Complete portable bundle |
-| Linux | [**Linux x64**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.5.0/Hostrail-1.5.0-linux-x64.tar.gz) | GTK desktop bundle |
-| Android | [**arm64 APK**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.5.0/Hostrail-1.5.0-android-arm64.apk) | Most recent phones and tablets |
-| Android | [**armv7 APK**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.5.0/Hostrail-1.5.0-android-armv7.apk) | Older 32-bit ARM devices |
-| Android | [**x86_64 APK**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.5.0/Hostrail-1.5.0-android-x86_64.apk) | Emulators and x86_64 devices |
+| macOS | [**Universal app**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.6.0/Hostrail-1.6.0-macos-universal.zip) | Apple Silicon + Intel |
+| Windows | [**Windows x64**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.6.0/Hostrail-1.6.0-windows-x64.zip) | Complete portable bundle |
+| Linux | [**Linux x64**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.6.0/Hostrail-1.6.0-linux-x64.tar.gz) | GTK desktop bundle |
+| Android | [**arm64 APK**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.6.0/Hostrail-1.6.0-android-arm64.apk) | Most recent phones and tablets |
+| Android | [**armv7 APK**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.6.0/Hostrail-1.6.0-android-armv7.apk) | Older 32-bit ARM devices |
+| Android | [**x86_64 APK**](https://github.com/Raterfy/hostrail-releases/releases/download/v1.6.0/Hostrail-1.6.0-android-x86_64.apk) | Emulators and x86_64 devices |
 
 Every release includes `SHA256SUMS.txt`. After downloading it beside an
 artifact, verify the file before installation:
@@ -70,7 +70,7 @@ shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 
 ### Self-hosted synchronization
 
-Hostrail 1.5.0 can synchronize the encrypted Vault through an SSH/SFTP server
+Hostrail 1.6.0 can synchronize the encrypted Vault through an SSH/SFTP server
 you already control. There is no Hostrail sync server to deploy and no hosted
 control plane:
 
@@ -80,8 +80,182 @@ control plane:
 4. Hostrail downloads, authenticates, merges, re-encrypts, and atomically
    uploads the Vault archive.
 
-The sync passphrase is not stored by Hostrail and is never sent to the VPS.
-Synchronization is manual in this release.
+Synchronization can run manually, at startup, and after debounced local Vault
+changes. Automatic sync protects the sync passphrase in the operating system's
+secure storage and uses an already-saved SSH credential without opening a
+background prompt. The passphrase is never sent to the VPS.
+
+An expiring atomic SFTP lock prevents simultaneous devices from overwriting the
+same archive. Active locks return a stable busy status, while abandoned locks
+expire after 15 minutes.
+
+## Docker SFTP setup for Hostrail sync
+
+Docker can host a dedicated **SFTP endpoint** for the encrypted Vault archive. It
+does not run Hostrail itself and does not provide a browser-accessible Hostrail
+web interface. Install the native Hostrail application on every device that
+needs access.
+
+### 1. Prepare the VPS
+
+Install Docker Engine and the Compose plugin, then create persistent directories:
+
+```bash
+mkdir -p ~/hostrail-sftp/{keys,storage}
+cd ~/hostrail-sftp
+sudo chown -R 1001:1001 storage
+chmod 700 keys
+```
+
+### 2. Generate a key on a trusted client
+
+Run this on your computer, not on the VPS:
+
+```bash
+mkdir -p ~/.config/hostrail-sync
+ssh-keygen -t ed25519 \
+  -f ~/.config/hostrail-sync/id_ed25519 \
+  -C hostrail-sync
+```
+
+Copy only the public key to the VPS:
+
+```bash
+scp ~/.config/hostrail-sync/id_ed25519.pub \
+  your-admin-user@your-vps:~/hostrail-sftp/keys/hostrail.pub
+ssh your-admin-user@your-vps \
+  'chmod 600 ~/hostrail-sftp/keys/hostrail.pub'
+```
+
+Never place `id_ed25519` in the Docker directory or on the VPS. Import that
+private key into Hostrail's protected Keychain on each trusted device.
+
+### 3. Create `compose.yml`
+
+Save the following as `~/hostrail-sftp/compose.yml`:
+
+```yaml
+services:
+  hostrail-sftp:
+    image: atmoz/sftp:alpine
+    container_name: hostrail-sftp
+    restart: unless-stopped
+
+    ports:
+      - "2222:22"
+
+    command: hostrail::1001:1001
+
+    volumes:
+      - ./storage:/home/hostrail/data
+      - ./keys/hostrail.pub:/home/hostrail/.ssh/keys/hostrail.pub:ro
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    cap_add:
+      - AUDIT_WRITE
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+      - SYS_CHROOT
+```
+
+The `hostrail` user has no password. The encrypted archive persists in
+`./storage`, independently from the container lifecycle.
+
+### 4. Start and test SFTP
+
+On the VPS:
+
+```bash
+cd ~/hostrail-sftp
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 hostrail-sftp
+```
+
+From the trusted client:
+
+```bash
+sftp -P 2222 -i ~/.config/hostrail-sync/id_ed25519 \
+  hostrail@your-vps.example.com
+```
+
+Run `ls data`, then exit with `quit`.
+
+### 5. Configure Hostrail
+
+Create a saved host in Hostrail with:
+
+```text
+Address: your-vps.example.com
+Port: 2222
+Username: hostrail
+Credential: the imported client key
+Remote path: data/vault-v1.enc
+```
+
+Connect once and verify the SSH host-key fingerprint. Then open
+**Settings → Sync**, select the saved host, enter `data/vault-v1.enc`, and use
+**Sync now**. Enter the same sync passphrase on every device, or enable
+**Automatic sync** to protect it in the operating system secure store.
+
+Hostrail sends only the Argon2id + AES-256-GCM encrypted archive. The SFTP
+container never receives the sync passphrase or cleartext Vault. Automatic sync
+uses only an SSH credential already stored in Hostrail.
+
+### 6. Firewall or VPN
+
+Prefer WireGuard, Tailscale, or another private network. If port `2222` must be
+public, restrict it to trusted source addresses. Example with UFW:
+
+```bash
+sudo ufw allow from 203.0.113.10 to any port 2222 proto tcp
+sudo ufw status
+```
+
+Replace the example address with the trusted client's public IP. With a VPN, bind
+the Compose mapping to the VPS VPN address, for example
+`100.64.0.10:2222:22`, instead of every interface.
+
+### 7. Back up and restore
+
+Create a backup on the VPS:
+
+```bash
+cd ~/hostrail-sftp
+tar -czf "hostrail-sftp-$(date +%Y%m%d-%H%M%S).tar.gz" storage
+```
+
+Copy the backup away from the VPS. To restore it:
+
+```bash
+cd ~/hostrail-sftp
+docker compose down
+tar -xzf /path/to/hostrail-sftp-backup.tar.gz
+sudo chown -R 1001:1001 storage
+docker compose up -d
+```
+
+### 8. Update the container
+
+```bash
+cd ~/hostrail-sftp
+docker compose pull
+docker compose up -d
+docker image prune -f
+```
+
+`docker compose down` keeps `./storage`. Do not delete that directory unless the
+archive is backed up and permanent deletion is intended.
 
 ## Privacy and security
 
